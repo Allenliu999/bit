@@ -1,0 +1,154 @@
+import os
+import re
+import sys
+from bs4 import BeautifulSoup
+
+
+def find_html_files(paths):
+    html_files = []
+    for path in paths:
+        if os.path.isfile(path) and path.lower().endswith('.html'):
+            html_files.append(path)
+        elif os.path.isdir(path):
+            for root, _, files in os.walk(path):
+                for file in files:
+                    if file.lower().endswith('.html'):
+                        html_files.append(os.path.join(root, file))
+    return html_files
+
+
+def clean_td_content(td):
+    # 保留数字或数字:数字，去除所有标签
+    text = td.get_text()
+    match = re.fullmatch(r'\s*(\d+\s*:\s*\d+|\d+)\s*', text)
+    if match:
+        # 只保留数字和冒号
+        cleaned = re.sub(r'\s+', '', match.group(1))
+        td.clear()
+        td.append(cleaned)
+        return cleaned
+    return None
+
+
+def extract_num_pair(s):
+    # 返回(左,右)，如31:29->(31,29)，28->(28,None)
+    s = s.replace(' ', '')
+    if ':' in s:
+        left, right = s.split(':', 1)
+        return int(left), int(right)
+    else:
+        return int(s), None
+
+
+def check_and_fix_table(table, filename, table_idx, log_lines):
+    tbody = table.find('tbody')
+    if not tbody:
+        return False, False  # 跳过，无tbody
+    trs = tbody.find_all('tr', recursive=False)
+    if not trs:
+        return False, False
+    # 检查所有tr的第一个td内容格式
+    cleaned_nums = []
+    for tr in trs:
+        tds = tr.find_all('td', recursive=False)
+        if not tds:
+            return False, False
+        cleaned = clean_td_content(tds[0])
+        if cleaned is None:
+            return False, False  # 格式不符，跳过
+        cleaned_nums.append(cleaned)
+    modified = False
+    # 检查首行数字
+    first_left, _ = extract_num_pair(cleaned_nums[0])
+    if first_left != 31:
+        log_lines.append(f"{filename} 表格{table_idx + 1} 首行首数字不是31，已修正为31")
+        # 修正
+        if ':' in cleaned_nums[0]:
+            _, right = cleaned_nums[0].split(':', 1)
+            trs[0].find_all('td', recursive=False)[0].string = f"31:{right}"
+        else:
+            trs[0].find_all('td', recursive=False)[0].string = "31"
+        modified = True
+    # 检查末行数字
+    last_left, last_right = extract_num_pair(cleaned_nums[-1])
+    last_num = last_right if last_right is not None else last_left
+    if last_num != 0:
+        log_lines.append(f"{filename} 表格{table_idx + 1} 末行最后数字不是0，已修正为0")
+        # 修正
+        if ':' in cleaned_nums[-1]:
+            left, _ = cleaned_nums[-1].split(':', 1)
+            trs[-1].find_all('td', recursive=False)[0].string = f"{left}:0"
+        else:
+            trs[-1].find_all('td', recursive=False)[0].string = "0"
+        modified = True
+    # 检查数字连贯递减
+    if len(trs) == 1:
+        return True, modified
+    for i in range(len(cleaned_nums) - 1):
+        cur_left, cur_right = extract_num_pair(cleaned_nums[i])
+        next_left, next_right = extract_num_pair(cleaned_nums[i + 1])
+        cur_num = cur_right if cur_right is not None else cur_left
+        next_num = next_left
+        if cur_num - next_num != 1:
+            log_lines.append(f"{filename} 表格{table_idx + 1} 第{i + 1}行与第{i + 2}行数字不连贯递减，已跳过该表格")
+            return False, modified
+    return True, modified
+
+
+def process_file(filepath, log_lines):
+    # 读取文件并保留原始编码
+    with open(filepath, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    # 解析HTML内容
+    soup = BeautifulSoup(content, 'html.parser')
+    tables = soup.find_all('table')
+
+    if not tables:
+        return  # 无表格，跳过
+
+    table_ok = True
+    table_modified = False
+
+    # 处理表格
+    for idx, table in enumerate(tables):
+        ok, modified = check_and_fix_table(table, os.path.basename(filepath), idx, log_lines)
+        if not ok:
+            table_ok = False
+        if modified:
+            table_modified = True
+
+    if table_ok and not table_modified:
+        log_lines.append(f"{os.path.basename(filepath)} 此文件没有问题")
+
+    if table_modified:
+        # 保存文件时保留原始格式和位置
+        with open(filepath, 'w', encoding='utf-8') as f:
+            # 使用prettify()方法保持格式
+            f.write(soup.prettify())
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("用法: python bit_field_modify.py <html文件或目录> [更多文件或目录...]")
+        return
+
+    # 获取命令行参数中的文件和目录路径
+    paths = sys.argv[1:]
+    html_files = find_html_files(paths)
+    log_lines = []
+
+    # 处理每个HTML文件
+    for file in html_files:
+        process_file(file, log_lines)
+
+    # 写日志
+    with open('process_html_tables.log', 'w', encoding='utf-8') as logf:
+        for line in log_lines:
+            logf.write(line + '\n')
+
+    print("处理完成，日志已保存到 process_html_tables.log")
+
+
+if __name__ == '__main__':
+    main()
